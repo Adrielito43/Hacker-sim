@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simulador Hacker — WLATHACK</title>
+  <style>
+    :root{
+      --bg:#020207;
+      --text:#bfe6b9;
+      --accent:#7bd389;
+      --muted:#6b6b6b;
+      --mono: "Courier New", Courier, monospace;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--mono);}
+    .wrap{display:flex;flex-direction:column;height:100vh;padding:12px;box-sizing:border-box;}
+    header{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
+    h1{font-size:16px;margin:0;color:var(--accent);letter-spacing:1px;}
+    .controls{margin-left:auto;display:flex;gap:8px;align-items:center;}
+    input[type="text"]{background:#0b0b0b;border:1px solid #111;color:var(--text);padding:6px;border-radius:6px;width:120px}
+    button{background:#0b0b0b;border:1px solid #222;color:var(--text);padding:6px 8px;border-radius:6px;cursor:pointer}
+    button:active{transform:translateY(1px)}
+    main{flex:1;display:flex;gap:12px;align-items:stretch;}
+    .console{flex:1;background:linear-gradient(180deg,#041014 0%, #020207 100%);border-radius:6px;padding:12px;overflow:auto;box-shadow:0 6px 18px rgba(0,0,0,0.6);}
+    .console pre{margin:0;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.3}
+    .sidebar{width:220px;min-width:160px;background:#071017;border-radius:6px;padding:12px;color:var(--muted);font-size:13px}
+    label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+    .small{font-size:12px;color:var(--muted)}
+    .chip{background:#071a0e;color:var(--accent);padding:6px;border-radius:6px;font-size:12px;margin-bottom:6px;display:inline-block}
+    footer{color:var(--muted);font-size:12px;margin-top:8px}
+    @media(max-width:720px){
+      main{flex-direction:column}
+      .sidebar{width:auto}
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>&gt;&gt;&gt; WLATHACK SIMULATOR v1.0</h1>
+      <div class="controls">
+        <label class="small">Seed (opcional)</label>
+        <input id="seedInput" type="text" placeholder="ej: 42" />
+        <button id="startBtn">Iniciar</button>
+        <button id="stopBtn" disabled>Detener</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="console" id="console" aria-live="polite">
+        <pre id="consolePre">Presiona "Iniciar" para comenzar la simulación...</pre>
+      </section>
+
+      <aside class="sidebar">
+        <div class="chip">Modo: Visual / Seguro</div>
+        <label>Configuración (edítala en CONFIG dentro del script)</label>
+        <div class="small">
+          Cambia: TARGETS, SERVICES, USERNAMES, PASSWORD_WORDLIST, FILES, MATRIX_WORDS, LOOP_ROUNDS, SPEED...
+        </div>
+        <hr />
+        <div style="margin-top:8px">
+          <strong>Controles rápidos</strong>
+          <div class="small" style="margin-top:6px">
+            - Iniciar: lanza la simulación.<br/>
+            - Detener: para inmediatamente.<br/>
+            - Seed: si pones un número, la salida será la misma cada vez.
+          </div>
+        </div>
+        <footer>Seguro: no abre puertos ni escribe archivos.</footer>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+  // ------------------ CONFIG (cambia lo que quieras) ------------------
+  const CONFIG = {
+    TARGETS: ["192.168.0.101","10.0.0.42","172.16.254.3","server-alpha.local","vault.internal","core-node-7"],
+    SERVICES: ["ssh","rdp","ftp","http","db","smtp","winrm"],
+    USERNAMES: ["admin","root","service","backup","sysop","guest"],
+    PASSWORD_WORDLIST: ["password","123456","qwerty","letmein","hunter2","admin123"],
+    FILES: ["/etc/passwd","/var/backups/db.dump","/home/admin/.ssh/id_rsa","/opt/secrets/keys.json","/root/notes.txt","/srv/data/reports.zip"],
+    MATRIX_WORDS: ["010101","ACCESS","AUTH","TOKEN","DATA","ROOT","OK","SYNC","ERR"],
+    BANNER: ">>> WLATHACK SIMULATOR v1.0 <<<",
+    LOOP_ROUNDS: 12,   // cuantas "acciones" por ejecución
+    SPEED: { short:30, med:120, long:500 } // ms
+  };
+  // -------------------------------------------------------------------
+
+  // Optional reproducible PRNG (mulberry32)
+  function mulberry32(seed) {
+    let t = seed >>> 0;
+    return function() {
+      t += 0x6D2B79F5;
+      let r = Math.imul(t ^ t >>> 15, 1 | t);
+      r ^= r + Math.imul(r ^ r >>> 7, 61 | r);
+      return ((r ^ r >>> 14) >>> 0) / 4294967296;
+    }
+  }
+
+  // DOM
+  const consolePre = document.getElementById('consolePre');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const seedInput = document.getElementById('seedInput');
+  const consoleEl = document.getElementById('console');
+
+  let stopFlag = false;
+  let rng = Math.random; // default
+
+  // helper sleep
+  function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+  // write line with type effect
+  async function typeLine(line, delay=CONFIG.SPEED.short){
+    for (let ch of line){
+      if (stopFlag) return;
+      consolePre.textContent += ch;
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+      await sleep(delay);
+    }
+    consolePre.textContent += "\n";
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+
+  function randInt(a,b){ return Math.floor(rng()*(b-a+1))+a; }
+  function choice(arr){ return arr[Math.floor(rng()*arr.length)]; }
+  function sample(arr,k){
+    const copy = arr.slice();
+    for (let i = copy.length-1;i>0;i--){
+      const j = Math.floor(rng()*(i+1));
+      [copy[i],copy[j]]=[copy[j],copy[i]];
+    }
+    return copy.slice(0,k);
+  }
+
+  async function fakeBanner(){
+    await typeLine("=".repeat(56), CONFIG.SPEED.short/1.5);
+    const centered = CONFIG.BANNER.padStart(Math.floor((56+CONFIG.BANNER.length)/2)).padEnd(56);
+    await typeLine(centered, CONFIG.SPEED.short/1.5);
+    await typeLine("=".repeat(56), CONFIG.SPEED.short/1.5);
+    await sleep(100);
+  }
+
+  async function fakePortScan(target){
+    await typeLine("[ * ] Escaneando " + target + "...", CONFIG.SPEED.short);
+    const openPorts = sample(Array.from({length:1000}, (_,i)=>i+20), randInt(2,5));
+    for (let p of openPorts){
+      if (stopFlag) return;
+      const svc = choice(CONFIG.SERVICES);
+      await typeLine("  > Puerto " + p + "/tcp  -> abierto (" + svc + ")", CONFIG.SPEED.short/2);
+      await sleep(CONFIG.SPEED.short/2);
+    }
+    await sleep(CONFIG.SPEED.med);
+  }
+
+  async function fakeBruteforce(target){
+    await typeLine("[ ! ] Intentando acceso a " + target + " por SSH...", CONFIG.SPEED.short);
+    const user = choice(CONFIG.USERNAMES);
+    await typeLine("    usuario: " + user, CONFIG.SPEED.short);
+    const attempts = randInt(6,14);
+    for (let i=0;i<attempts;i++){
+      if (stopFlag) return;
+      const pw = choice(CONFIG.PASSWORD_WORDLIST) + randInt(0,999);
+      await typeLine("    probando: " + pw, CONFIG.SPEED.short/3);
+      await sleep(CONFIG.SPEED.short/3);
+    }
+    const success = rng() < 0.25; // 25% chance
+    if (success) {
+      await typeLine("{+} Acceso concedido como " + user + "@" + target, CONFIG.SPEED.med);
+    } else {
+      await typeLine("{-} Acceso fallido", CONFIG.SPEED.med);
+    }
+  }
+
+  async function fakeDataExfil(target){
+    await typeLine("[ * ] Buscando archivos sensibles en " + target + "...", CONFIG.SPEED.short);
+    const found = sample(CONFIG.FILES, randInt(1, Math.min(3, CONFIG.FILES.length)));
+    for (let f of found){
+      if (stopFlag) return;
+      const size = randInt(10,2048);
+      await typeLine("    encontrado: " + f + " (" + size + " KB)", CONFIG.SPEED.short/2);
+      await sleep(CONFIG.SPEED.short/2);
+    }
+    await typeLine("[ ! ] Exfiltrando datos... 0% -> 100%", CONFIG.SPEED.short);
+    for (let p=0;p<=100;p+=10){
+      if (stopFlag) return;
+      await typeLine("    progreso: " + p + "%", CONFIG.SPEED.short/8);
+      await sleep(CONFIG.SPEED.short/8);
+    }
+    await typeLine("{+} Transferencia completada: " + found.length + " archivo(s)", CONFIG.SPEED.med);
+  }
+
+  async function matrixRain(duration=1200){
+    const end = Date.now() + duration;
+    while (Date.now() < end){
+      if (stopFlag) return;
+      const w = choice(CONFIG.MATRIX_WORDS);
+      const spaces = " ".repeat(randInt(0, 30));
+      await typeLine(spaces + w, CONFIG.SPEED.short/6);
+    }
+  }
+
+  async function mainLoop(rounds = CONFIG.LOOP_ROUNDS){
+    stopFlag = false;
+    consolePre.textContent = ""; // clear
+    await fakeBanner();
+    for (let i=0;i<rounds;i++){
+      if (stopFlag) break;
+      const action = choice(["scan","brute","exfil","matrix","sleep"]);
+      const target = choice(CONFIG.TARGETS);
+      if (action === "scan") await fakePortScan(target);
+      else if (action === "brute") await fakeBruteforce(target);
+      else if (action === "exfil") await fakeDataExfil(target);
+      else if (action === "matrix") await matrixRain(randInt(400,1100));
+      else await typeLine("[ ~ ] Procesando paquetes...", CONFIG.SPEED.med);
+      await sleep(randInt(150, 900));
+    }
+    if (!stopFlag) await typeLine("--- Simulación finalizada ---", CONFIG.SPEED.short);
+  }
+
+  // Controls
+  startBtn.addEventListener('click', () => {
+    // setup RNG if seed provided
+    const seedVal = seedInput.value.trim();
+    if (seedVal !== ""){
+      // try parse int
+      const n = parseInt(seedVal,10);
+      if (!isNaN(n)){
+        rng = mulberry32(n);
+      } else {
+        // hash string to number
+        let h = 2166136261 >>> 0;
+        for (let i=0;i<seedVal.length;i++){
+          h ^= seedVal.charCodeAt(i);
+          h = Math.imul(h, 16777619);
+        }
+        rng = mulberry32(h >>> 0);
+      }
+    } else {
+      rng = Math.random;
+    }
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    seedInput.disabled = true;
+    mainLoop(CONFIG.LOOP_ROUNDS).then(()=> {
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      seedInput.disabled = false;
+    }).catch(()=>{ /* ignore */ });
+  });
+
+  stopBtn.addEventListener('click', () => {
+    stopFlag = true;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    seedInput.disabled = false;
+  });
+
+  // Allow Enter in seedInput to start
+  seedInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') startBtn.click();
+  });
+
+  </script>
+</body>
+</html>
